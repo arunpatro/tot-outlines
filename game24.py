@@ -88,18 +88,15 @@ def test_standard():
     Test the score using 5-shot standard prompting
     '''
     ## constants
-    n_generate_per_input = 5
+    n_samples = 5
+    complete = models.text_completion.openai("gpt-3.5-turbo", max_tokens = 1000, temperature = 0.7)
     
     ## generate all answers for all questions
     outputs = []
     for x in tqdm(inputs):
         prompt = standard_prompt(x)
-        messages = [{"role": "user", "content": prompt}]
-        res = openai.ChatCompletion.create(messages=messages, model="gpt-3.5-turbo", max_tokens=1000, temperature=0.7, n = n_generate_per_input)
-        outputs.append([choice["message"]["content"] for choice in res["choices"]])
-        
-        # token usage
-        update_token_usage(res)
+        answers = complete(prompt, sample = n_samples)
+        outputs.append(answers)
         
     ## check accuracy of the answers
     n_any_correct = 0
@@ -124,18 +121,16 @@ def test_cot():
     Test the score using 5-shot cot prompting
     '''
     ## constants
-    n_generate_per_input = 5
+    n_samples = 5
+    complete = models.text_completion.openai("gpt-3.5-turbo", max_tokens = 1000, temperature = 0.7)
     
     ## generate all answers for all questions
     outputs = []
     for x in tqdm(inputs):
         prompt = cot_prompt(x)
         messages = [{"role": "user", "content": prompt}]
-        res = openai.ChatCompletion.create(messages=messages, model="gpt-3.5-turbo", max_tokens=1000, temperature=0.7, n = n_generate_per_input)
-        outputs.append([choice["message"]["content"] for choice in res["choices"]])
-        
-        # token usage
-        update_token_usage(res)
+        answers = complete(prompt, sample = n_samples)
+        outputs.append(answers)
         
     ## check accuracy of the answers
     n_any_correct = 0
@@ -164,6 +159,3 @@ if __name__ == "__main__":
 
     # test_standard()
     test_cot()
-    
-    print("completion tokens: ", completion_tokens)
-    print("prompt tokens: ", prompt_tokens)
