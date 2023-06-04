@@ -9,6 +9,9 @@ import itertools
 import numpy as np
 import backoff
 from sqlitedict import SqliteDict
+from functools import wraps
+import hashlib
+import json
 # print(openai.api_key)
 
 ## few-shot example data
@@ -35,7 +38,6 @@ input_output_examples = [
         "output": "5 + 5 + 5 + 9 = 24"
     },
 ]
-
 
 cot_examples = [
     {
@@ -85,19 +87,6 @@ cot_examples = [
     },
 ]
 
-# globals
-completion_tokens = 0
-prompt_tokens = 0
-
-data = pd.read_csv("./data/24.csv")['Puzzles']
-inputs = data[:5]  # 5 examples
-
-oai_model = models.text_completion.openai("gpt-4", max_tokens = 1000, temperature = 0.7)
-# oai_model = models.text_completion.openai(
-#     "gpt-3.5-turbo", max_tokens=1000, temperature=0.7)
-
-cache = SqliteDict('./my_db.sqlite', autocommit=True)
-
 ## prompts
 @text.prompt
 def standard_prompt(input, examples=input_output_examples):
@@ -123,7 +112,6 @@ def cot_prompt(input, examples=cot_examples):
     Input: {{input}}
     '''
 
-
 def update_token_usage(res):
     '''
     Need this to keep track of token usage and cost
@@ -132,7 +120,6 @@ def update_token_usage(res):
     global prompt_tokens
     completion_tokens += res['usage']['completion_tokens']
     prompt_tokens += res['usage']['prompt_tokens']
-
 
 def eval_output_game24(input: str, output: str) -> bool:
     '''
@@ -150,12 +137,6 @@ def eval_output_game24(input: str, output: str) -> bool:
     except Exception as e:
         # print(e)
         return False
-
-
-@backoff.on_exception(backoff.expo, openai.error.RateLimitError, max_time=60)
-def model(*args, **kwargs):
-    return oai_model(*args, **kwargs)
-
 
 def test_standard():
     '''
@@ -186,8 +167,6 @@ def test_standard():
     print("n_inputs with atleast 1 correct answer: ", n_any_correct)
     print("avg number of correct answers per input: ",
           sum(avg_correct_arr) / len(avg_correct_arr))
-
-
 
 def test_cot():
     '''
@@ -220,6 +199,48 @@ def test_cot():
           sum(avg_correct_arr) / len(avg_correct_arr))
 
 
+# globals
+completion_tokens = 0
+prompt_tokens = 0
+
+data = pd.read_csv("./data/24.csv")['Puzzles']
+inputs = data[10:20]  # 10 examples
+
+# oai_model = models.text_completion.openai("gpt-4", max_tokens = 1000, temperature = 0.7)
+oai_model = models.text_completion.openai(
+    "gpt-3.5-turbo", max_tokens=1000, temperature=0.7)
+
+
+cache = SqliteDict('./my_db.sqlite', autocommit=True)
+
+def cache_sqlite(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Create a key from the function name, args, and kwargs
+        key_data = {
+            "func": func.__name__,
+            "args": args,
+            "kwargs": kwargs
+        }
+        key = hashlib.md5(json.dumps(key_data, sort_keys=True).encode()).hexdigest()
+
+        # Check if the result is in cache
+        if key in cache:
+            return cache[key]
+
+        # If not, execute the function and cache the result
+        result = func(*args, **kwargs)
+        cache[key] = result
+        return result
+    return wrapper
+
+@backoff.on_exception(backoff.expo, (openai.error.RateLimitError, openai.error.OpenAIError), max_time=120)
+@cache_sqlite
+def model(*args, **kwargs):
+    return oai_model(*args, **kwargs)
+
+
+
 #################################
 #######  TREE OF THOUGHTS  ######
 #################################
@@ -240,7 +261,6 @@ propose_examples = [
     }
 ]
 
-
 @text.prompt
 def propose_prompt(input, examples=propose_examples):
     '''
@@ -255,11 +275,9 @@ def propose_prompt(input, examples=propose_examples):
     Possible next steps:
     '''
 
-
 def get_current_numbers(y: str) -> str:
     last_line = y.strip().split('\n')[-1]
     return last_line.split('left: ')[-1].split(')')[0]
-
 
 def get_proposals(x: str, y: str = '') -> list[str]:
     current_numbers = get_current_numbers(y if y else x)
@@ -275,7 +293,6 @@ def get_proposals(x: str, y: str = '') -> list[str]:
     # new thought has past steps encoded in it
     proposals_arr = [y + _ + '\n' for _ in proposals_arr]
     return proposals_arr
-
 
 value_examples = [
     {
@@ -345,7 +362,6 @@ value_examples = [
     }
 ]
 
-
 @text.prompt
 def value_prompt(input, examples=value_examples):
     '''Evaluate if given numbers can reach 24 (sure/likely/impossible)
@@ -405,7 +421,6 @@ def value_last_step_prompt(input, answer, examples=value_last_step_examples):
     Answer: {{answer}}
     Judge:'''
 
-
 def get_value_prompt(x, y):
     '''
     If final answer is found, we use a different value prompt
@@ -417,7 +432,6 @@ def get_value_prompt(x, y):
         return value_last_step_prompt(input=x, answer=ans)
     current_numbers = get_current_numbers(y)
     return value_prompt(current_numbers)
-
 
 def parse_compute_value(x: str, y: str, value_outputs: list) -> float:
     '''
@@ -439,9 +453,6 @@ def parse_compute_value(x: str, y: str, value_outputs: list) -> float:
     print(f'->{value=}')
     return value
 
-
-
-
 def get_value(x, y, n_evaluate_sample, cache_value):
     '''
     Obtain the value of the partial/completed output y, given the input x.
@@ -457,11 +468,10 @@ def get_value(x, y, n_evaluate_sample, cache_value):
         cache[value_prompt] = value
     return value
 
-
-def get_values(x, ys, n_evaluate_sample, cache_value=True):
+def get_values(x, ys, n_evaluate_sample, cache_value=False):
     values = []
     local_value_cache = {} # TODO not sure why this is present
-    for y in tqdm(ys):  # each partial output
+    for y in ys:  # each partial output
         if y in local_value_cache:  # avoid duplicate candidates
             value = 0
         else:
