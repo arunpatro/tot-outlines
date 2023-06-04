@@ -471,19 +471,24 @@ def get_values(x, ys, n_evaluate_sample, cache_value=True):
     return values
 
 def test_tot_bfs():
+    '''
+    This is actually a BEAM search, with beam width as n_best
+    '''
     n_steps = 4 # this problem should have max 4 steps ideally to finally generate the answer
     n_eval = 4  # how many samples, to calculate value
-    n_best = 5  # how many best candidates to select
+    n_best = 5  # how many best candidates to select for the next bfs queue
 
     outputs = []
     for i, x in tqdm(enumerate(inputs)):
         print(i, x)
-        ys = ['']  # current output candidates
+        queue = ['']  # current output candidates
         for step in range(n_steps): 
-            print(f"{step=} {len(ys)=}")
+            print(f"{step=} {len(queue)=}")
             # step 1 - generate new candidates (partial outputs). this is the output at the end
-            new_ys = [get_proposals(x, y) for y in ys]
-            new_ys = list(itertools.chain(*new_ys)) # flatten
+            new_ys = []
+            for y in queue:
+                proposals = get_proposals(x, y)
+                new_ys.extend(proposals)
 
             # step 2 - evaluate the candidates
             values = get_values(x, new_ys, n_eval)
@@ -505,9 +510,9 @@ def test_tot_bfs():
                 print(f"best -- {value=}\t{y=}")
 
             # step 4 - update the candidates
-            ys = best_ys
+            queue = best_ys
             
-        outputs.append(ys)
+        outputs.append(best_ys)
 
 
     # check accuracy of the answers
