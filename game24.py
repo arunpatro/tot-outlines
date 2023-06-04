@@ -90,11 +90,11 @@ completion_tokens = 0
 prompt_tokens = 0
 
 data = pd.read_csv("./data/24.csv")['Puzzles']
-inputs = data[:10]  # 10 examples
+inputs = data[:5]  # 5 examples
 
-# oai_model = models.text_completion.openai("gpt-4", max_tokens = 1000, temperature = 0.7)
-oai_model = models.text_completion.openai(
-    "gpt-3.5-turbo", max_tokens=1000, temperature=0.5)
+oai_model = models.text_completion.openai("gpt-4", max_tokens = 1000, temperature = 0.7)
+# oai_model = models.text_completion.openai(
+#     "gpt-3.5-turbo", max_tokens=1000, temperature=0.7)
 
 cache = SqliteDict('./my_db.sqlite', autocommit=True)
 
@@ -152,7 +152,7 @@ def eval_output_game24(input: str, output: str) -> bool:
         return False
 
 
-@backoff.on_exception(backoff.expo, openai.error.OpenAIError)
+@backoff.on_exception(backoff.expo, openai.error.RateLimitError, max_time=60)
 def model(*args, **kwargs):
     return oai_model(*args, **kwargs)
 
@@ -266,7 +266,6 @@ def get_proposals(x: str, y: str = '') -> list[str]:
     if current_numbers == '24':
         ## this stage is reached when the answer is found, so generate a proposal to get the final answer
         prompt = cot_prompt(input=x) + 'Steps:' + y
-        print("End reached cot=", [prompt])
     else:
         prompt = propose_prompt(current_numbers)
 
@@ -407,18 +406,20 @@ def value_last_step_prompt(input, answer, examples=value_last_step_examples):
     Judge:'''
 
 
-
 def get_value_prompt(x, y):
+    '''
+    If final answer is found, we use a different value prompt
+    If not, we use another value prompt
+    '''
     last_line = y.strip().split('\n')[-1]
     if 'left: ' not in last_line:  # last step
         ans = last_line.lower().replace('answer: ', '')
-        # print([value_last_step_prompt.format(input=x, answer=ans)])
         return value_last_step_prompt(input=x, answer=ans)
     current_numbers = get_current_numbers(y)
     return value_prompt(current_numbers)
 
 
-def value_outputs_unwrap(x: str, y: str, value_outputs: list) -> float:
+def parse_compute_value(x: str, y: str, value_outputs: list) -> float:
     '''
     The idea is to determine a value for the output. now we only score the output label.
     we can additionally score the reasoning steps too.
@@ -443,13 +444,15 @@ def value_outputs_unwrap(x: str, y: str, value_outputs: list) -> float:
 
 def get_value(x, y, n_evaluate_sample, cache_value):
     '''
-    Check compatibility of a partial output with the input using a prompt
+    Obtain the value of the partial/completed output y, given the input x.
+    Value can be assigned by a LLM or a defined function, or a combination of both for various steps
+    Idea is to automate all the steps by a LLM
     '''
     value_prompt = get_value_prompt(x, y)
     if cache_value and value_prompt in cache:
         return cache[value_prompt]
     value_outputs = model(value_prompt, samples=n_evaluate_sample)
-    value = value_outputs_unwrap(x, y, value_outputs)
+    value = parse_compute_value(x, y, value_outputs)
     if cache_value:
         cache[value_prompt] = value
     return value
@@ -457,7 +460,7 @@ def get_value(x, y, n_evaluate_sample, cache_value):
 
 def get_values(x, ys, n_evaluate_sample, cache_value=True):
     values = []
-    local_value_cache = {}
+    local_value_cache = {} # TODO not sure why this is present
     for y in tqdm(ys):  # each partial output
         if y in local_value_cache:  # avoid duplicate candidates
             value = 0
@@ -467,69 +470,65 @@ def get_values(x, ys, n_evaluate_sample, cache_value=True):
         values.append(value)
     return values
 
-# def test_tot_bfs():
+def test_tot_bfs():
+    n_steps = 4 # this problem should have max 4 steps ideally to finally generate the answer
+    n_eval = 4  # how many samples, to calculate value
+    n_best = 5  # how many best candidates to select
 
-n_steps = 4
-n_eval = 4  # how many samples, to calculate value
-n_best = 5  # how many best candidates to select
+    outputs = []
+    for i, x in tqdm(enumerate(inputs)):
+        print(i, x)
+        ys = ['']  # current output candidates
+        for step in range(n_steps): 
+            print(f"{step=} {len(ys)=}")
+            # step 1 - generate new candidates (partial outputs). this is the output at the end
+            new_ys = [get_proposals(x, y) for y in ys]
+            new_ys = list(itertools.chain(*new_ys)) # flatten
 
-for x in tqdm(inputs):
-    print(x)
-    break
+            # step 2 - evaluate the candidates
+            values = get_values(x, new_ys, n_eval)
 
-ys = ['']  # current output candidates
-for step in range(n_steps):
-    print(f"{step=} {len(ys)=}")
-    # step 1 - generate new candidates
-    # new proposals for the next step which should ideally have less number of numbers left
-    # also possible that all the candidates are bad/invalid
-    new_ys = [get_proposals(x, y) for y in ys]
-    new_ys = list(itertools.chain(*new_ys))
+            # Sort the values in descending order
+            sorted_indices = np.argsort(values)[::-1]
+            sorted_values = [values[i] for i in sorted_indices]
+            sorted_ys = [new_ys[i] for i in sorted_indices]
 
-    # for y in new_ys:
-    # print(f"-- {y=}")
+            # Print the sorted values and corresponding new_ys
+            for val, y in zip(sorted_values, sorted_ys):
+                print(f"-- {val=}\t{y=}")
 
-    # step 2 - evaluate the candidates
-    values = get_values(x, new_ys, n_eval)
+            # Step 3 - Select the best candidates
+            best_values = sorted_values[:n_best]
+            best_ys = sorted_ys[:n_best]
 
-    # Sort the values in descending order
-    sorted_indices = np.argsort(values)[::-1]
-    sorted_values = [values[i] for i in sorted_indices]
-    sorted_ys = [new_ys[i] for i in sorted_indices]
+            for y, value in zip(best_ys, best_values):
+                print(f"best -- {value=}\t{y=}")
 
-    # Print the sorted values and corresponding new_ys
-    for val, y in zip(sorted_values, sorted_ys):
-        print(f"-- {val=}\t{y=}")
-
-    # Step 3 - Select the best candidates
-    best_values = sorted_values[:n_best]
-    best_ys = sorted_ys[:n_best]
-
-    for y, value in zip(best_ys, best_values):
-        print(f"best -- {value=}\t{y=}")
-
-    # step 4 - update the candidates
-    ys = best_ys
-
-answers = ys
-
-outputs = [ys]
+            # step 4 - update the candidates
+            ys = best_ys
+            
+        outputs.append(ys)
 
 
-# check accuracy of the answers
-n_any_correct = 0
-avg_correct_arr = []
-for x, ys in zip(inputs, outputs):
-    status = [eval_output_game24(x, y) for y in ys]
-    if any(status):
-        n_any_correct += 1
+    # check accuracy of the answers
+    n_any_correct = 0
+    avg_correct_arr = []
+    for i, (x, ys) in enumerate(zip(inputs, outputs)):
+        status = [eval_output_game24(x, y) for y in ys]
+        if any(status):
+            n_any_correct += 1
 
-    avg_correct_arr.append(sum(status) / len(status))
-    break
+        avg_correct_arr.append(sum(status) / len(status))
+        print(f"{i=} {x=} {status=} {any(status)} {avg_correct_arr[-1]=}")
 
 
-print("ToT Prompting\n------------------")
-print("n_inputs: ", len(inputs))
-print("n_inputs with atleast 1 correct answer: ", n_any_correct)
-print("avg number of correct answers per input: ",
-      sum(avg_correct_arr) / len(avg_correct_arr))
+    print("ToT Prompting\n------------------")
+    print("n_inputs: ", len(inputs))
+    print("n_inputs with atleast 1 correct answer: ", n_any_correct)
+    print("avg number of correct answers per input: ",
+        sum(avg_correct_arr) / len(avg_correct_arr))
+
+if __name__ == '__main__':
+    # test_standard()
+    # test_cot()
+    test_tot_bfs()
