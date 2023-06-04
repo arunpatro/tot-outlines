@@ -96,6 +96,7 @@ inputs = data[:10]  # 10 examples
 oai_model = models.text_completion.openai(
     "gpt-3.5-turbo", max_tokens=1000, temperature=0.5)
 
+cache = SqliteDict('./my_db.sqlite', autocommit=True)
 
 ## prompts
 @text.prompt
@@ -219,8 +220,10 @@ def test_cot():
           sum(avg_correct_arr) / len(avg_correct_arr))
 
 
+#################################
+#######  TREE OF THOUGHTS  ######
+#################################
 
-# tree of thought
 propose_examples = [
     {
         "input": "2 8 8 14",
@@ -261,7 +264,8 @@ def get_current_numbers(y: str) -> str:
 def get_proposals(x: str, y: str = '') -> list[str]:
     current_numbers = get_current_numbers(y if y else x)
     if current_numbers == '24':
-        prompt = cot_prompt.format(input=x) + 'Steps:' + y
+        ## this stage is reached when the answer is found, so generate a proposal to get the final answer
+        prompt = cot_prompt(input=x) + 'Steps:' + y
         print("End reached cot=", [prompt])
     else:
         prompt = propose_prompt(current_numbers)
@@ -277,17 +281,17 @@ def get_proposals(x: str, y: str = '') -> list[str]:
 value_examples = [
     {
         "input": "10 14",
-        "reasoning_steps": ["10 + 14 = 24"],
+        "steps": ["10 + 14 = 24"],
         "output": "sure"
     },
     {
         "input": "11 12",
-        "reasoning_steps": ["11 + 12 = 23", "12 - 11 = 1", "11 * 12 = 132", "11 / 12 = 0.91"],
+        "steps": ["11 + 12 = 23", "12 - 11 = 1", "11 * 12 = 132", "11 / 12 = 0.91"],
         "output": "impossible"
     },
     {
         "input": "4 4 10",
-        "reasoning_steps": [
+        "steps": [
             "4 + 4 + 10 = 8 + 10 = 18",
             "4 * 10 - 4 = 40 - 4 = 36",
             "(10 - 4) * 4 = 6 * 4 = 24"
@@ -296,12 +300,12 @@ value_examples = [
     },
     {
         "input": "4 9 11",
-        "reasoning_steps": ["9 + 11 + 4 = 20 + 4 = 24"],
+        "steps": ["9 + 11 + 4 = 20 + 4 = 24"],
         "output": "sure"
     },
     {
         "input": "5 7 8",
-        "reasoning_steps": [
+        "steps": [
             "5 + 7 + 8 = 12 + 8 = 20",
             "(8 - 5) * 7 = 3 * 7 = 21",
             "I cannot obtain 24 now, but numbers are within a reasonable range"
@@ -310,7 +314,7 @@ value_examples = [
     },
     {
         "input": "5 6 6",
-        "reasoning_steps": [
+        "steps": [
             "5 + 6 + 6 = 17",
             "(6 - 5) * 6 = 1 * 6 = 6",
             "I cannot obtain 24 now, but numbers are within a reasonable range"
@@ -319,7 +323,7 @@ value_examples = [
     },
     {
         "input": "10 10 11",
-        "reasoning_steps": [
+        "steps": [
             "10 + 10 + 11 = 31",
             "(11 - 10) * 10 = 10",
             "10 10 10 are all too big"
@@ -328,12 +332,17 @@ value_examples = [
     },
     {
         "input": "1 3 3",
-        "reasoning_steps": [
+        "steps": [
             "1 * 3 * 3 = 9",
             "(1 + 3) * 3 = 12",
             "1 3 3 are all too small"
         ],
         "output": "impossible"
+    },
+    {
+        "input": "24",
+        "steps": ["24 = 24 (solved, no steps needed)"],
+        "output": "sure"
     }
 ]
 
@@ -343,15 +352,15 @@ def value_prompt(input, examples=value_examples):
     '''Evaluate if given numbers can reach 24 (sure/likely/impossible)
     {% for example in examples %}
     Input: {{ example.input }}
-    {% for next_step in example.reasoning_steps %}
-    {{ next_step }}
+    {% for step in example.steps %}
+    {{ step }}
     {% endfor %}
     {{ example.output }}
     {% endfor %}
     Input: {{input}}
     '''
 
-
+## this can be more descriptive i feel, difficult to train using 1-line input and expecting it do for previous states
 value_last_step_examples = [
     {
         "input": "4 4 6 8",
@@ -410,6 +419,11 @@ def get_value_prompt(x, y):
 
 
 def value_outputs_unwrap(x: str, y: str, value_outputs: list) -> float:
+    '''
+    The idea is to determine a value for the output. now we only score the output label.
+    we can additionally score the reasoning steps too.
+    this calculation need not be perfect
+    '''
     if len(y.strip().split('\n')) == 4 and 'answer' not in y.lower():
         print(f'4 steps done but no answer found {y=}')
         return 0
@@ -425,7 +439,6 @@ def value_outputs_unwrap(x: str, y: str, value_outputs: list) -> float:
     return value
 
 
-cache = SqliteDict('./my_db.sqlite', autocommit=True)
 
 
 def get_value(x, y, n_evaluate_sample, cache_value):
@@ -442,7 +455,7 @@ def get_value(x, y, n_evaluate_sample, cache_value):
     return value
 
 
-def get_values(x, ys, n_evaluate_sample, cache_value=False):
+def get_values(x, ys, n_evaluate_sample, cache_value=True):
     values = []
     local_value_cache = {}
     for y in tqdm(ys):  # each partial output
@@ -454,14 +467,15 @@ def get_values(x, ys, n_evaluate_sample, cache_value=False):
         values.append(value)
     return values
 
-
-for x in tqdm(inputs):
-    print(x)
-    break
+# def test_tot_bfs():
 
 n_steps = 4
 n_eval = 4  # how many samples, to calculate value
 n_best = 5  # how many best candidates to select
+
+for x in tqdm(inputs):
+    print(x)
+    break
 
 ys = ['']  # current output candidates
 for step in range(n_steps):
